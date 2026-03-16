@@ -159,6 +159,7 @@ class GameOfGenerals {
     this.replayTimer = null;
     this.lastCpuMove = null;
     this.cpuSamePieceStreak = 0;
+    this.cpuTurnCount = 0;
     this.swapSourceRow = null;
     this.swapSourceCol = null;
 
@@ -468,6 +469,7 @@ class GameOfGenerals {
     this.updateTurnLabel();
     this.lastCpuMove = null;
     this.cpuSamePieceStreak = 0;
+    this.cpuTurnCount = 0;
     this.swapSourceRow = null;
     this.swapSourceCol = null;
     this.resetHistory("Setup started");
@@ -748,6 +750,7 @@ class GameOfGenerals {
     this.selectedReserveId = null;
     this.lastCpuMove = null;
     this.cpuSamePieceStreak = 0;
+    this.cpuTurnCount = 0;
     this.swapSourceRow = null;
     this.swapSourceCol = null;
     this.updateTurnLabel();
@@ -1020,6 +1023,14 @@ class GameOfGenerals {
       return;
     }
 
+    if (this.gameMode === "cpu" && owner === this.cpuOwner) {
+      this.deployCpuSetup(owner);
+      this.selectedReserveId = null;
+      this.playSound("move");
+      if (this.allDeployed(owner)) this.advanceSetupPhase();
+      return;
+    }
+
     const slots = [];
     for (const row of this.getSetupRows(owner)) {
       for (let col = 0; col < COLS; col += 1) {
@@ -1045,6 +1056,126 @@ class GameOfGenerals {
       } else {
         this.advanceSetupPhase();
       }
+    }
+  }
+
+  deployCpuSetup(owner) {
+    const rows = [...this.getSetupRows(owner)].sort((a, b) => a - b);
+    const forward = this.getForwardStep(owner);
+    const frontRow = forward === 1 ? rows[rows.length - 1] : rows[0];
+    const backRow = forward === 1 ? rows[0] : rows[rows.length - 1];
+    const midRow = rows.find((row) => row !== frontRow && row !== backRow) ?? rows[1];
+    const occupied = new Set();
+
+    const markOccupied = (row, col) => occupied.add(this.key(row, col));
+    for (const piece of this.pieces) {
+      if (piece.alive && piece.deployed && piece.owner === owner && piece.row !== null && piece.col !== null) {
+        markOccupied(piece.row, piece.col);
+      }
+    }
+
+    const isOpen = (row, col) => row >= 0 && row < ROWS && col >= 0 && col < COLS && !occupied.has(this.key(row, col));
+    const place = (piece, preferredSlots) => {
+      if (!piece || piece.deployed) return false;
+      for (const slot of preferredSlots) {
+        if (isOpen(slot.row, slot.col)) {
+          piece.row = slot.row;
+          piece.col = slot.col;
+          piece.deployed = true;
+          markOccupied(slot.row, slot.col);
+          return true;
+        }
+      }
+      for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+          if (!isOpen(row, col)) continue;
+          if (!this.isCellInSetupZone(row, owner)) continue;
+          piece.row = row;
+          piece.col = col;
+          piece.deployed = true;
+          markOccupied(row, col);
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const undeployed = this.getUndeployedPieces(owner);
+    const takeOne = (predicate, sorter = null) => {
+      const matches = undeployed.filter((piece) => !piece.deployed && predicate(piece));
+      if (!matches.length) return null;
+      if (sorter) matches.sort(sorter);
+      const chosen = matches[0];
+      return chosen || null;
+    };
+
+    const centerCols = [3, 4, 2, 5, 1, 6, 0, 7];
+    const edgeCols = [0, 7, 1, 6, 2, 5, 3, 4];
+
+    const flag = takeOne((piece) => piece.rank === RANKS.FLAG);
+    const flagPlaced = place(flag, [
+      { row: backRow, col: 3 },
+      { row: backRow, col: 4 },
+      { row: backRow, col: 2 },
+      { row: backRow, col: 5 }
+    ]);
+
+    let flagRow = backRow;
+    let flagCol = 3;
+    if (flagPlaced && flag) {
+      flagRow = flag.row;
+      flagCol = flag.col;
+    }
+
+    const guardSlots = [
+      { row: flagRow, col: flagCol - 1 },
+      { row: flagRow, col: flagCol + 1 },
+      { row: midRow, col: flagCol },
+      { row: backRow, col: flagCol - 2 },
+      { row: backRow, col: flagCol + 2 }
+    ];
+
+    for (let i = 0; i < 3; i += 1) {
+      const guard = takeOne((piece) => piece.rank === RANKS.PRIVATE);
+      if (!guard) break;
+      place(guard, guardSlots);
+    }
+
+    const spies = undeployed
+      .filter((piece) => !piece.deployed && piece.rank === RANKS.SPY)
+      .sort((a, b) => a.id.localeCompare(b.id));
+    for (let i = 0; i < spies.length; i += 1) {
+      const preferredCol = i % 2 === 0 ? 2 : 5;
+      place(spies[i], [
+        { row: midRow, col: preferredCol },
+        { row: midRow, col: 7 - preferredCol },
+        { row: frontRow, col: preferredCol },
+        { row: backRow, col: preferredCol }
+      ]);
+    }
+
+    const officers = undeployed
+      .filter((piece) => !piece.deployed && piece.rank < RANKS.PRIVATE)
+      .sort((a, b) => a.rank - b.rank);
+    for (const piece of officers) {
+      const targets = [
+        ...centerCols.map((col) => ({ row: frontRow, col })),
+        ...centerCols.map((col) => ({ row: midRow, col })),
+        ...centerCols.map((col) => ({ row: backRow, col }))
+      ];
+      place(piece, targets);
+    }
+
+    const privates = undeployed
+      .filter((piece) => !piece.deployed && piece.rank === RANKS.PRIVATE)
+      .sort((a, b) => a.id.localeCompare(b.id));
+    for (const piece of privates) {
+      const targets = [
+        ...edgeCols.map((col) => ({ row: frontRow, col })),
+        ...centerCols.map((col) => ({ row: midRow, col })),
+        ...edgeCols.map((col) => ({ row: backRow, col }))
+      ];
+      place(piece, targets);
     }
   }
 
@@ -1498,6 +1629,7 @@ class GameOfGenerals {
 
   computerMove() {
     if (this.gameOver || this.phase !== "battle" || this.currentPlayer !== this.cpuOwner) return;
+    this.cpuTurnCount += 1;
 
     const cpuPieces = this.pieces.filter((piece) => piece.alive && piece.deployed && piece.owner === this.cpuOwner);
     const candidates = [];
@@ -1524,6 +1656,7 @@ class GameOfGenerals {
   pickAIMoveByDifficulty(candidates) {
     const levelFactor = (this.battleLevel - 1) / 99;
     const profile = this.getAIDifficultyProfile();
+    const personality = this.getAIPersonalityProfile();
     const ranked = candidates
       .map((entry) => ({
         ...entry,
@@ -1537,21 +1670,43 @@ class GameOfGenerals {
     );
     const topMoves = ranked.slice(0, Math.min(topWindow, ranked.length));
 
-    let best = topMoves[0];
-    let bestScore = -Infinity;
+    const scoredMoves = [];
     for (const move of topMoves) {
       const safety = this.estimateMoveSafety(move.piece, move.move);
+      const strategic = this.evaluateStrategicIntel(move.piece, move.move);
+      const tactical = this.evaluateTacticalOpportunity(move.piece, move.move);
+      const formation = this.evaluateFormationDiscipline(move.piece, move.move);
+      const duality = this.evaluateAttackDefenseBalance(move.piece, move.move);
       const safetyWeight = profile.baseSafetyWeight + levelFactor * profile.levelSafetyBoost;
+      const strategyWeight = profile.baseStrategyWeight + levelFactor * profile.levelStrategyBoost;
       const noiseRange = Math.max(0.2, profile.baseNoise * (1 - levelFactor * 0.85));
       const repetitionPenalty = this.getCpuRepetitionPenalty(move.piece, move.move);
-      const decisionScore = move.score + safety * safetyWeight - repetitionPenalty + Math.random() * noiseRange;
-      if (decisionScore > bestScore) {
-        best = move;
-        bestScore = decisionScore;
-      }
+      const humanNoise = Math.random() * personality.humanLikeNoise;
+      const decisionScore =
+        move.score +
+        safety * safetyWeight * personality.safetyBias +
+        strategic * strategyWeight * personality.strategyBias +
+        tactical * personality.tacticalBias +
+        formation * personality.formationBias +
+        duality * personality.dualBias -
+        repetitionPenalty +
+        Math.random() * noiseRange +
+        humanNoise;
+
+      scoredMoves.push({ ...move, decisionScore });
     }
 
-    return best;
+    scoredMoves.sort((a, b) => b.decisionScore - a.decisionScore);
+    if (!scoredMoves.length) return ranked[0];
+
+    const bestScore = scoredMoves[0].decisionScore;
+    const closeMoves = scoredMoves.filter((entry) => bestScore - entry.decisionScore <= personality.choiceSpread);
+    const pool = closeMoves.slice(0, Math.min(personality.maxChoicePool, closeMoves.length));
+    if (pool.length > 1 && Math.random() < personality.varietyChance) {
+      return pool[Math.floor(Math.random() * pool.length)];
+    }
+
+    return scoredMoves[0];
   }
 
   getCpuRepetitionPenalty(piece, move) {
@@ -1597,6 +1752,8 @@ class GameOfGenerals {
         minTopWindow: 1,
         baseSafetyWeight: 1.4,
         levelSafetyBoost: 2.1,
+        baseStrategyWeight: 1.15,
+        levelStrategyBoost: 1.55,
         baseNoise: 1.4
       };
     }
@@ -1607,6 +1764,8 @@ class GameOfGenerals {
         minTopWindow: 2,
         baseSafetyWeight: 1.0,
         levelSafetyBoost: 1.6,
+        baseStrategyWeight: 0.9,
+        levelStrategyBoost: 1.2,
         baseNoise: 2.8
       };
     }
@@ -1617,6 +1776,8 @@ class GameOfGenerals {
         minTopWindow: 3,
         baseSafetyWeight: 0.65,
         levelSafetyBoost: 1.2,
+        baseStrategyWeight: 0.7,
+        levelStrategyBoost: 0.95,
         baseNoise: 4.4
       };
     }
@@ -1626,22 +1787,184 @@ class GameOfGenerals {
       minTopWindow: 6,
       baseSafetyWeight: 0.35,
       levelSafetyBoost: 0.8,
+      baseStrategyWeight: 0.5,
+      levelStrategyBoost: 0.6,
       baseNoise: 7.2
     };
   }
 
+  getAIPersonalityProfile() {
+    const cpuFlag = this.findFlagPiece(this.cpuOwner);
+    const cpuFlagThreat = cpuFlag ? this.countAdjacentThreats(this.cpuOwner, cpuFlag.row, cpuFlag.col) : 0;
+    const materialDelta = this.getMaterialScore(this.cpuOwner) - this.getMaterialScore(this.humanOwner);
+    const flagRaceAdv = this.getFlagRaceAdvantage();
+    const tuning = this.getAIDifficultyTuning();
+
+    const defensiveStance = cpuFlagThreat >= 1 || (materialDelta > 20 && flagRaceAdv < 0);
+    const aggressiveStance = materialDelta < -8 || flagRaceAdv > 0;
+    const stance = defensiveStance ? "defensive" : aggressiveStance ? "aggressive" : "balanced";
+
+    let base;
+
+    if (stance === "aggressive") {
+      base = {
+        safetyBias: 1.15,
+        strategyBias: 1.28,
+        tacticalBias: 1.4,
+        formationBias: 1.1,
+        dualBias: 1.25,
+        varietyChance: 0.16,
+        choiceSpread: 6.5,
+        maxChoicePool: 3,
+        humanLikeNoise: 0.65
+      };
+      return this.applyDifficultyToPersonality(base, tuning);
+    }
+
+    if (stance === "defensive") {
+      base = {
+        safetyBias: 1.55,
+        strategyBias: 1.08,
+        tacticalBias: 1.05,
+        formationBias: 1.45,
+        dualBias: 1.4,
+        varietyChance: 0.14,
+        choiceSpread: 6,
+        maxChoicePool: 3,
+        humanLikeNoise: 0.55
+      };
+      return this.applyDifficultyToPersonality(base, tuning);
+    }
+
+    base = {
+      safetyBias: 1.2,
+      strategyBias: 1.2,
+      tacticalBias: 1.2,
+      formationBias: 1.15,
+      dualBias: 1.3,
+      varietyChance: 0.15,
+      choiceSpread: 6.3,
+      maxChoicePool: 3,
+      humanLikeNoise: 0.6
+    };
+
+    return this.applyDifficultyToPersonality(base, tuning);
+  }
+
+  getAIDifficultyTuning() {
+    if (this.aiDifficulty === "pro") {
+      return {
+        strengthFactor: 1.22,
+        disciplineFactor: 1.2,
+        varietyFactor: 0.7,
+        spreadFactor: 0.72,
+        noiseFactor: 0.55,
+        poolDelta: -1
+      };
+    }
+
+    if (this.aiDifficulty === "hard") {
+      return {
+        strengthFactor: 1.12,
+        disciplineFactor: 1.1,
+        varietyFactor: 0.86,
+        spreadFactor: 0.84,
+        noiseFactor: 0.75,
+        poolDelta: 0
+      };
+    }
+
+    if (this.aiDifficulty === "medium") {
+      return {
+        strengthFactor: 0.9,
+        disciplineFactor: 0.92,
+        varietyFactor: 1.05,
+        spreadFactor: 1.12,
+        noiseFactor: 1.15,
+        poolDelta: 0
+      };
+    }
+
+    return {
+      strengthFactor: 0.78,
+      disciplineFactor: 0.82,
+      varietyFactor: 1.18,
+      spreadFactor: 1.28,
+      noiseFactor: 1.35,
+      poolDelta: 1
+    };
+  }
+
+  applyDifficultyToPersonality(base, tuning) {
+    return {
+      safetyBias: base.safetyBias * tuning.strengthFactor,
+      strategyBias: base.strategyBias * tuning.disciplineFactor,
+      tacticalBias: base.tacticalBias * tuning.strengthFactor,
+      formationBias: base.formationBias * tuning.disciplineFactor,
+      dualBias: base.dualBias * tuning.disciplineFactor,
+      varietyChance: Math.max(0.04, Math.min(0.34, base.varietyChance * tuning.varietyFactor)),
+      choiceSpread: Math.max(3.6, base.choiceSpread * tuning.spreadFactor),
+      maxChoicePool: Math.max(2, Math.min(4, base.maxChoicePool + tuning.poolDelta)),
+      humanLikeNoise: Math.max(0.18, base.humanLikeNoise * tuning.noiseFactor)
+    };
+  }
+
+  getMaterialScore(owner) {
+    const alive = this.pieces.filter((piece) => piece.alive && piece.deployed && piece.owner === owner);
+    let score = 0;
+    for (const piece of alive) {
+      if (piece.rank === RANKS.FLAG) {
+        score += 60;
+      } else if (piece.rank === RANKS.PRIVATE) {
+        score += 5;
+      } else if (piece.rank === RANKS.SPY) {
+        score += 11;
+      } else {
+        score += 18 - piece.rank;
+      }
+    }
+    return score;
+  }
+
+  getFlagRaceAdvantage() {
+    const cpuFlag = this.findFlagPiece(this.cpuOwner);
+    const humanFlag = this.findFlagPiece(this.humanOwner);
+    if (!cpuFlag || !humanFlag) return 0;
+
+    const cpuDist = this.distanceToEnemyBackRow(this.cpuOwner, cpuFlag.row);
+    const humanDist = this.distanceToEnemyBackRow(this.humanOwner, humanFlag.row);
+    return humanDist - cpuDist;
+  }
+
+  getForwardStep(owner) {
+    return owner === 1 ? -1 : 1;
+  }
+
+  getEnemyBackRow(owner) {
+    return owner === 1 ? 0 : ROWS - 1;
+  }
+
+  distanceToEnemyBackRow(owner, row) {
+    return Math.abs(this.getEnemyBackRow(owner) - row);
+  }
+
   evaluatePositionalValue(piece, move) {
+    const forward = this.getForwardStep(piece.owner);
+    const movedForward = (move.row - piece.row) * forward;
+    const towardEnemyBonus = movedForward > 0 ? 4.2 : movedForward < 0 ? -5.5 : 0;
+    const distanceGain = this.distanceToEnemyBackRow(piece.owner, piece.row) - this.distanceToEnemyBackRow(piece.owner, move.row);
+
     let bonus = 0;
-    if (piece.rank !== RANKS.FLAG) bonus += move.row * 1.2;
-    else bonus += move.row * 0.35;
+    if (piece.rank !== RANKS.FLAG) bonus += towardEnemyBonus + distanceGain * 3.4;
+    else bonus += towardEnemyBonus * 1.7 + distanceGain * 8.6;
 
     const centerDistance = Math.abs(move.col - (COLS - 1) / 2);
-    bonus += (3.5 - centerDistance) * 0.6;
+    bonus += (3.5 - centerDistance) * (piece.rank === RANKS.FLAG ? 0.3 : 0.85);
     return bonus;
   }
 
   estimateMoveSafety(piece, move) {
-    const enemies = this.pieces.filter((p) => p.alive && p.deployed && p.owner === this.humanOwner);
+    const enemies = this.pieces.filter((p) => p.alive && p.deployed && p.owner !== piece.owner);
     let risk = 0;
 
     for (const enemy of enemies) {
@@ -1657,22 +1980,278 @@ class GameOfGenerals {
     return risk;
   }
 
+  evaluateStrategicIntel(piece, move) {
+    return this.simulateMoveOutcome(piece, move, () => {
+      let score = 0;
+      const cpuFlag = this.findFlagPiece(this.cpuOwner);
+      const humanFlag = this.findFlagPiece(this.humanOwner);
+
+      if (piece.rank === RANKS.FLAG) {
+        const dist = this.distanceToEnemyBackRow(piece.owner, piece.row);
+        score += (ROWS - dist) * 7.5;
+        const ownMoves = this.getValidMoves(piece);
+        score += ownMoves.length * 2.8;
+      }
+
+      if (cpuFlag && cpuFlag.alive && cpuFlag.deployed) {
+        const nearbyEnemies = this.countAdjacentThreats(cpuFlag.owner, cpuFlag.row, cpuFlag.col);
+        score -= nearbyEnemies * 75;
+
+        const guards = this.countAdjacentGuards(cpuFlag.owner, cpuFlag.row, cpuFlag.col);
+        score += guards * 12;
+
+        if (this.isFlagPathOpen(cpuFlag)) score += 10;
+      }
+
+      if (humanFlag && humanFlag.alive && humanFlag.deployed) {
+        const pressure = 8 - this.distanceToNearestCpuPiece(humanFlag.row, humanFlag.col);
+        score += pressure * 3.2;
+      }
+
+      const counterPressure = this.estimateHumanCounterPressure();
+      score -= counterPressure;
+
+      return score;
+    });
+  }
+
+  evaluateTacticalOpportunity(piece, move) {
+    const target = this.getPieceAt(move.row, move.col);
+    let score = 0;
+
+    if (target && target.owner !== piece.owner) {
+      if (target.rank === RANKS.FLAG) return 900;
+      const result = this.computeBattleResult(piece, target);
+      if (result === "attacker") score += 140 + (16 - target.rank) * 5;
+      else if (result === "both") score += 34;
+      else score -= 36;
+    }
+
+    return this.simulateMoveOutcome(piece, move, () => {
+      const enemyFlag = this.findFlagPiece(this.humanOwner);
+      if (enemyFlag) {
+        const dist = Math.abs(piece.row - enemyFlag.row) + Math.abs(piece.col - enemyFlag.col);
+        if (dist === 1) score += 42;
+        else if (dist === 2) score += 16;
+      }
+      return score;
+    });
+  }
+
+  evaluateFormationDiscipline(piece, move) {
+    return this.simulateMoveOutcome(piece, move, () => {
+      let allies = 0;
+      let enemies = 0;
+      const near = [
+        { r: -1, c: 0 },
+        { r: 1, c: 0 },
+        { r: 0, c: -1 },
+        { r: 0, c: 1 }
+      ];
+
+      for (const d of near) {
+        const row = piece.row + d.r;
+        const col = piece.col + d.c;
+        if (row < 0 || row >= ROWS || col < 0 || col >= COLS) continue;
+        const occupant = this.getPieceAt(row, col);
+        if (!occupant) continue;
+        if (occupant.owner === piece.owner) allies += 1;
+        else enemies += 1;
+      }
+
+      if (piece.rank === RANKS.FLAG) return allies * 12 - enemies * 45;
+      if (piece.rank <= RANKS.CAPTAIN) return allies * 6 - enemies * 7;
+      return allies * 4 - enemies * 6;
+    });
+  }
+
+  evaluateAttackDefenseBalance(piece, move) {
+    const cpuFlag = this.findFlagPiece(this.cpuOwner);
+    const protectDistBefore = cpuFlag
+      ? Math.abs(piece.row - cpuFlag.row) + Math.abs(piece.col - cpuFlag.col)
+      : 99;
+    const target = this.getPieceAt(move.row, move.col);
+
+    return this.simulateMoveOutcome(piece, move, () => {
+      let score = 0;
+      const enemyFlag = this.findFlagPiece(this.humanOwner);
+
+      if (enemyFlag) {
+        const pressureDist = Math.abs(piece.row - enemyFlag.row) + Math.abs(piece.col - enemyFlag.col);
+        score += Math.max(0, 7 - pressureDist) * 6.5;
+      }
+
+      if (target && target.owner !== piece.owner) {
+        const result = this.computeBattleResult(piece, target);
+        if (result === "attacker") score += 42;
+        else if (result === "both") score += 10;
+        else score -= 30;
+      }
+
+      if (cpuFlag && cpuFlag.alive && cpuFlag.deployed) {
+        const threats = this.countAdjacentThreats(this.cpuOwner, cpuFlag.row, cpuFlag.col);
+        const guards = this.countAdjacentGuards(this.cpuOwner, cpuFlag.row, cpuFlag.col);
+        score += guards * 11 - threats * 34;
+
+        if (piece.rank !== RANKS.FLAG && protectDistBefore === 1) {
+          const protectDistAfter = Math.abs(piece.row - cpuFlag.row) + Math.abs(piece.col - cpuFlag.col);
+          if (protectDistAfter > 1) score -= 26;
+        }
+      }
+
+      return score;
+    });
+  }
+
+  estimateHumanCounterPressure() {
+    const humanPieces = this.pieces.filter((p) => p.alive && p.deployed && p.owner === this.humanOwner);
+    let pressure = 0;
+
+    for (const enemy of humanPieces) {
+      const moves = this.getValidMoves(enemy);
+      for (const next of moves) {
+        const target = this.getPieceAt(next.row, next.col);
+        if (!target || target.owner !== this.cpuOwner) continue;
+
+        if (target.rank === RANKS.FLAG) {
+          pressure = Math.max(pressure, 340);
+          continue;
+        }
+
+        const result = this.computeBattleResult(enemy, target);
+        if (result === "attacker") {
+          pressure = Math.max(pressure, 48 + (16 - target.rank) * 7);
+        } else if (result === "both") {
+          pressure = Math.max(pressure, 22 + (16 - target.rank) * 2.5);
+        }
+      }
+    }
+
+    return pressure;
+  }
+
+  findFlagPiece(owner) {
+    return this.pieces.find((piece) => piece.alive && piece.deployed && piece.owner === owner && piece.rank === RANKS.FLAG) || null;
+  }
+
+  countAdjacentThreats(flagOwner, row, col) {
+    const enemies = this.pieces.filter((piece) => piece.alive && piece.deployed && piece.owner !== flagOwner);
+    let count = 0;
+    for (const enemy of enemies) {
+      const dist = Math.abs(enemy.row - row) + Math.abs(enemy.col - col);
+      if (dist === 1) count += 1;
+    }
+    return count;
+  }
+
+  countAdjacentGuards(flagOwner, row, col) {
+    const allies = this.pieces.filter((piece) => piece.alive && piece.deployed && piece.owner === flagOwner && piece.rank !== RANKS.FLAG);
+    let count = 0;
+    for (const ally of allies) {
+      const dist = Math.abs(ally.row - row) + Math.abs(ally.col - col);
+      if (dist === 1) count += 1;
+    }
+    return count;
+  }
+
+  isFlagPathOpen(flagPiece) {
+    const forward = this.getForwardStep(flagPiece.owner);
+    const nextRow = flagPiece.row + forward;
+    if (nextRow < 0 || nextRow >= ROWS) return true;
+    const blocker = this.getPieceAt(nextRow, flagPiece.col);
+    return !blocker || blocker.owner !== flagPiece.owner;
+  }
+
+  distanceToNearestCpuPiece(row, col) {
+    const cpuPieces = this.pieces.filter((piece) => piece.alive && piece.deployed && piece.owner === this.cpuOwner);
+    let min = 99;
+    for (const piece of cpuPieces) {
+      const dist = Math.abs(piece.row - row) + Math.abs(piece.col - col);
+      if (dist < min) min = dist;
+    }
+    return min;
+  }
+
+  simulateMoveOutcome(piece, move, callback) {
+    const defender = this.getPieceAt(move.row, move.col);
+    const attackerState = {
+      row: piece.row,
+      col: piece.col,
+      alive: piece.alive,
+      deployed: piece.deployed
+    };
+    const defenderState = defender
+      ? { row: defender.row, col: defender.col, alive: defender.alive, deployed: defender.deployed }
+      : null;
+
+    try {
+      if (!defender) {
+        piece.row = move.row;
+        piece.col = move.col;
+      } else if (defender.rank === RANKS.FLAG) {
+        defender.alive = false;
+        piece.row = move.row;
+        piece.col = move.col;
+      } else {
+        const result = this.computeBattleResult(piece, defender);
+        if (result === "attacker") {
+          defender.alive = false;
+          piece.row = move.row;
+          piece.col = move.col;
+        } else if (result === "defender") {
+          piece.alive = false;
+        } else {
+          piece.alive = false;
+          defender.alive = false;
+        }
+      }
+
+      return callback();
+    } finally {
+      piece.row = attackerState.row;
+      piece.col = attackerState.col;
+      piece.alive = attackerState.alive;
+      piece.deployed = attackerState.deployed;
+
+      if (defender && defenderState) {
+        defender.row = defenderState.row;
+        defender.col = defenderState.col;
+        defender.alive = defenderState.alive;
+        defender.deployed = defenderState.deployed;
+      }
+    }
+  }
+
   scoreAIMove(piece, move) {
     const levelFactor = (this.battleLevel - 1) / 99;
     const profile = this.getAIDifficultyProfile();
     const noiseRange = Math.max(0.25, profile.baseNoise * (1 - levelFactor * 0.7));
     let score = Math.random() * noiseRange;
     const target = this.getPieceAt(move.row, move.col);
+    const enemyBackRow = this.getEnemyBackRow(piece.owner);
+
+    if (piece.rank === RANKS.FLAG && move.row === enemyBackRow) return 12000;
 
     if (target && target.owner === this.humanOwner) {
       if (target.rank === RANKS.FLAG) return 10000;
       const result = this.computeBattleResult(piece, target);
       if (result === "attacker") score += 220 + (16 - target.rank) * 6;
       else if (result === "both") score += 90;
-      else score += 25;
+      else score -= 18;
     } else {
-      if (piece.rank !== RANKS.FLAG) score += move.row * 1.4;
-      else score += move.row * 0.5;
+      const gain = this.distanceToEnemyBackRow(piece.owner, piece.row) - this.distanceToEnemyBackRow(piece.owner, move.row);
+      if (piece.rank !== RANKS.FLAG) score += gain * 8.2;
+      else score += gain * 20;
+    }
+
+    if (piece.rank !== RANKS.FLAG) {
+      const cpuFlag = this.findFlagPiece(this.cpuOwner);
+      if (cpuFlag && cpuFlag.alive && cpuFlag.deployed) {
+        const fromDist = Math.abs(piece.row - cpuFlag.row) + Math.abs(piece.col - cpuFlag.col);
+        const toDist = Math.abs(move.row - cpuFlag.row) + Math.abs(move.col - cpuFlag.col);
+        if (fromDist === 1 && toDist > 1) score -= 28;
+        if (toDist === 1) score += 12;
+      }
     }
 
     return score;
